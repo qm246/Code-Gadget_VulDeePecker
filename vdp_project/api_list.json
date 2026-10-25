@@ -1,0 +1,15 @@
+{
+  "strcpy": "backward",
+  "strncpy": "backward",
+  "strcat": "backward",
+  "strncat": "backward",
+  "memcpy": "backward",
+  "memmove": "backward",
+  "memset": "backward",
+  "sprintf": "backward",
+  "snprintf": "backward",
+  "recv": "forward",
+  "recvfrom": "forward",
+  "fgets": "forward",
+  "getenv": "forward"
+}
