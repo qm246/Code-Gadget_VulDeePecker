@@ -1,15 +1,16 @@
 
-"""Member B - Step I.2: Generate program slices."""
+"""Member B - Generate program slices."""
 
 import re
-from typing import List, Set, Tuple
+from typing import List
 
 from vdp_contract import KeyPoint, Slice, Statement
 
 
 ID = re.compile(r"\b[A-Za-z_]\w*\b")
-CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\(([^()]*)\)")
 HEADER = re.compile(r"\b([A-Za-z_]\w*)\s*\(([^()]*)\)\s*\{")
+CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\(([^()]*)\)")
+ASSIGN = re.compile(r"(?<![=!<>])(?:\+=|-=|\*=|/=|%=|=(?!=))")
 
 KEYWORDS = set("""
 auto break case char const continue default do double else enum extern
@@ -18,6 +19,7 @@ struct switch typedef union unsigned void volatile while _Bool
 """.split())
 
 CONTROL = {"if", "else", "for", "while", "switch", "return", "sizeof"}
+TYPE = r"(?:char|short|int|long|float|double|void|_Bool)"
 
 
 def clean(text):
@@ -30,16 +32,19 @@ def ids(text):
 
 
 def split_args(text):
-    result, start, depth = [], 0, 0
     if not text.strip():
         return ()
 
-    for i, c in enumerate(text):
-        if c in "([{":
+    result = []
+    start = 0
+    depth = 0
+
+    for i, char in enumerate(text):
+        if char in "([{":
             depth += 1
-        elif c in ")]}":
+        elif char in ")]}":
             depth = max(0, depth - 1)
-        elif c == "," and depth == 0:
+        elif char == "," and depth == 0:
             result.append(text[start:i].strip())
             start = i + 1
 
@@ -47,82 +52,152 @@ def split_args(text):
     return tuple(result)
 
 
+def calls_in(text):
+    return [
+        (name, split_args(args))
+        for name, args in CALL.findall(clean(text))
+        if name not in CONTROL
+    ]
+
+
 def parse_functions(source):
     lines = source.splitlines()
     text = "\n".join(lines)
     functions = []
+    occupied = []
 
-    for m in HEADER.finditer(text):
-        name = m.group(1)
+    for match in HEADER.finditer(text):
+        name = match.group(1)
+
         if name in CONTROL:
             continue
 
-        prefix = text[:m.start()]
-        boundary = max(prefix.rfind(";"), prefix.rfind("{"), prefix.rfind("}"))
+        prefix = text[:match.start()]
+        boundary = max(
+            prefix.rfind(";"),
+            prefix.rfind("{"),
+            prefix.rfind("}")
+        )
+
         if "=" in prefix[boundary + 1:]:
             continue
 
-        pos, depth = m.end(), 1
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+
+        pos = match.end()
+        depth = 1
+
         while pos < len(text) and depth:
-            depth += (text[pos] == "{") - (text[pos] == "}")
+            if text[pos] == "{":
+                depth += 1
+            elif text[pos] == "}":
+                depth -= 1
             pos += 1
+
         if depth:
             continue
 
         params = []
-        for p in split_args(m.group(2)):
-            if p.strip() == "void":
+
+        for param in split_args(match.group(2)):
+            if param.strip() == "void":
                 continue
-            names = [x for x in ID.findall(p) if x not in KEYWORDS]
+
+            names = [
+                x for x in ID.findall(param)
+                if x not in KEYWORDS
+            ]
+
             if names:
                 params.append(names[-1])
 
         functions.append({
             "name": name,
-            "start": text.count("\n", 0, m.start()) + 1,
-            "end": min(text.count("\n", 0, pos) + 1, len(lines)),
-            "signature": text.count("\n", 0, m.start(1)) + 1,
+            "start": text.count("\n", 0, match.start()) + 1,
+            "end": min(
+                text.count("\n", 0, pos) + 1,
+                len(lines)
+            ),
+            "signature": text.count("\n", 0, match.start(1)) + 1,
             "params": params,
         })
 
+        occupied.append((match.start(), pos))
+
+    functions.sort(key=lambda f: f["start"])
     return lines, functions
 
 
 def analyze(text):
-    """Trả về (biến được định nghĩa, biến được sử dụng)."""
+    """Return the variables defined and used by a statement."""
     text = clean(text)
 
     if not text or text.startswith("#"):
         return set(), set()
+
     if re.match(r"^(if|else|for|while|switch)\b", text):
         return set(), set()
 
-    assignment = re.search(
-        r"(?<![=!<>])(?:\+=|-=|\*=|/=|%=|=(?!=))", text
-    )
+    assignment = ASSIGN.search(text)
 
     if assignment:
-        lhs, rhs = text[:assignment.start()], text[assignment.end():]
-        names = [x for x in ID.findall(lhs) if x not in KEYWORDS]
+        lhs = text[:assignment.start()]
+        rhs = text[assignment.end():]
+
+        names = [
+            x for x in ID.findall(lhs)
+            if x not in KEYWORDS
+        ]
+
         defined = {names[-1]} if names else set()
-        return defined, ids(rhs) | (ids(lhs) - defined)
+        used = ids(rhs) | (ids(lhs) - defined)
+
+        return defined, used
 
     declaration = re.match(
-        r"^(?:(?:const|unsigned|signed)\s+)*"
-        r"(?:char|short|int|long|float|double|void|_Bool)"
-        r"\s+(.+);\s*$",
-        text,
+        r"^(?:(?:const|unsigned|signed|static|volatile)\s+)*"
+        + TYPE + r"\s+(.+);\s*$",
+        text
     )
 
     if declaration:
-        first = split_args(declaration.group(1))[0]
-        names = [x for x in ID.findall(first) if x not in KEYWORDS]
-        defined = {names[0]} if names else set()
-        uses = ids(re.sub(r"\b" + re.escape(next(iter(defined), "")) +
-                          r"\b", "", first)) if defined else set()
-        return defined, uses
+        defined = set()
+        used = set()
+
+        for item in split_args(declaration.group(1)):
+            left = item.split("=", 1)[0].strip()
+            names = [
+                x for x in ID.findall(left)
+                if x not in KEYWORDS
+            ]
+
+            if not names:
+                continue
+
+            defined.add(names[0])
+
+            if "=" in item:
+                used |= ids(item.split("=", 1)[1])
+
+            for array_size in re.findall(r"\[([^\]]*)\]", left):
+                used |= ids(array_size)
+
+        return defined, used
 
     return set(), ids(text)
+
+
+def is_declaration(text, var):
+    text = clean(text)
+
+    return bool(re.match(
+        r"^(?:(?:const|unsigned|signed|static|volatile)\s+)*"
+        + TYPE + r"\s+(?:\*\s*)*"
+        + re.escape(var)
+        + r"\b\s*(?:\[[^\]]*\])?\s*(?:=[^;]*)?;",
+        text
+    ))
 
 
 def build_slices(source: str, kp: KeyPoint) -> List[Slice]:
@@ -135,132 +210,166 @@ def build_slices(source: str, kp: KeyPoint) -> List[Slice]:
     statements = {}
     lookup = {}
 
-    for f in functions:
-        name = f["name"]
+    for function in functions:
+        name = function["name"]
         statements[name] = []
 
-        for line in range(f["start"], f["end"] + 1):
-            text = clean(lines[line - 1])
+        for line_no in range(function["start"], function["end"] + 1):
+            raw = lines[line_no - 1]
+            text = clean(raw)
 
             if not text or text in {"{", "}"}:
                 continue
+
             if re.match(r"^(if|else|for|while|switch)\b", text):
                 continue
 
-            st = Statement(name, line, lines[line - 1].strip())
-            statements[name].append(st)
-            lookup[(name, line)] = st
+            statement = Statement(name, line_no, raw.strip())
+            statements[name].append(statement)
+            lookup[(name, line_no)] = statement
 
-    def calls_in(text):
-        return [
-            (name, split_args(args))
-            for name, args in CALL.findall(clean(text))
-            if name not in CONTROL
-        ]
-
-    def trace(func, var, before, selected, visited):
-        state = (func, var, before)
-        if state in visited:
-            return
-        visited.add(state)
-
-        # Tìm định nghĩa gần nhất của biến.
-        for st in reversed(statements.get(func, [])):
-            if st.line >= before:
-                continue
-
-            defs, uses = analyze(st.text)
-            if var not in defs:
-                continue
-
-            selected.add((func, st.line))
-
-            # Giữ khai báo riêng đứng trước phép gán.
-            for prev in statements[func]:
-                if prev.line >= st.line:
-                    break
-                if re.match(
-                    r"^(?:(?:const|unsigned|signed)\s+)*"
-                    r"(?:char|short|int|long|float|double|void|_Bool)\s+"
-                    r"(?:\*\s*)*" + re.escape(var) + r"\b"
-                    r"\s*(?:\[[^\]]*\])?\s*;",
-                    clean(prev.text),
-                ):
-                    selected.add((func, prev.line))
-
-            for used in uses:
-                trace(func, used, st.line, selected, visited)
-            return
-
-        # Nếu là tham số hàm, truy ngược qua caller.
-        f = by_name[func]
-        if var not in f["params"]:
-            return
-
-        index = f["params"].index(var)
-
-        for caller in functions:
-            for st in statements[caller["name"]]:
-                for call, args in calls_in(st.text):
-                    if call != func or index >= len(args):
-                        continue
-
-                    selected.add((caller["name"], st.line))
-
-                    # Chỉ thêm chữ ký callee nếu tham số của nó
-                    # thực sự thuộc chuỗi phụ thuộc.
-                    selected.add((func, f["signature"]))
-
-                    for used in ids(args[index]):
-                        trace(
-                            caller["name"], used, st.line,
-                            selected, visited,
-                        )
-
-    def function_order(selected):
-        """Sắp xếp hàm theo quan hệ caller -> callee."""
-        names = {name for name, _ in selected}
-        edges = {name: set() for name in names}
-        indegree = {name: 0 for name in names}
-
-        for caller in names:
-            for st in statements.get(caller, []):
-                if (caller, st.line) not in selected:
-                    continue
-
-                for callee, _ in calls_in(st.text):
-                    if callee in names and callee != caller:
-                        if callee not in edges[caller]:
-                            edges[caller].add(callee)
-                            indegree[callee] += 1
-
-        source_order = {
-            f["name"]: i for i, f in enumerate(functions)
-        }
-        ready = sorted(
-            [n for n in names if indegree[n] == 0],
-            key=lambda n: source_order.get(n, 999),
-        )
+    def callers_of(func):
         result = []
 
-        while ready:
-            name = ready.pop(0)
-            result.append(name)
+        for caller in functions:
+            caller_name = caller["name"]
 
-            for callee in sorted(
-                edges[name],
-                key=lambda n: source_order.get(n, 999),
-            ):
-                indegree[callee] -= 1
-                if indegree[callee] == 0:
-                    ready.append(callee)
-                    ready.sort(key=lambda n: source_order.get(n, 999))
-
-        result.extend(n for n in sorted(
-            names, key=lambda n: source_order.get(n, 999)
-        ) if n not in result)
+            for statement in statements.get(caller_name, []):
+                for called, args in calls_in(statement.text):
+                    if called == func:
+                        result.append((caller_name, statement, args))
 
         return result
+
+    def previous_definition(func, var, before):
+        for statement in reversed(statements.get(func, [])):
+            if statement.line >= before:
+                continue
+
+            defined, used = analyze(statement.text)
+
+            if var in defined:
+                return statement, used
+
+        return None, set()
+
+    def backward(func, var, before, selected, visited):
+        state = (func, var, before)
+
+        if state in visited:
+            return
+
+        visited.add(state)
+
+        definition, used = previous_definition(func, var, before)
+
+        if definition:
+            selected.add((func, definition.line))
+
+            for statement in statements[func]:
+                if statement.line >= definition.line:
+                    break
+
+                if is_declaration(statement.text, var):
+                    selected.add((func, statement.line))
+
+            for used_var in used:
+                backward(
+                    func, used_var, definition.line,
+                    selected, visited
+                )
+
+            return
+
+        function = by_name[func]
+
+        if var not in function["params"]:
+            return
+
+        index = function["params"].index(var)
+
+        for caller_name, call_statement, args in callers_of(func):
+            if index >= len(args):
+                continue
+
+            selected.add((caller_name, call_statement.line))
+
+            for arg_var in ids(args[index]):
+                backward(
+                    caller_name, arg_var, call_statement.line,
+                    selected, visited
+                )
+
+    def forward(func, var, after, selected, visited):
+        state = (func, var, after)
+
+        if state in visited:
+            return
+
+        visited.add(state)
+
+        for statement in statements.get(func, []):
+            if statement.line <= after:
+                continue
+
+            defined, used = analyze(statement.text)
+
+            if var not in used:
+                continue
+
+            selected.add((func, statement.line))
+
+            for new_var in defined:
+                forward(
+                    func, new_var, statement.line,
+                    selected, visited
+                )
+
+            for called, args in calls_in(statement.text):
+                callee = by_name.get(called)
+
+                if not callee:
+                    continue
+
+                for index, arg in enumerate(args):
+                    if index >= len(callee["params"]):
+                        continue
+
+                    if var not in ids(arg):
+                        continue
+
+                    param = callee["params"][index]
+
+                    # Theo dõi dữ liệu trong hàm được gọi.
+                    # Không thêm dòng chữ ký hàm vào slice.
+                    forward(
+                        called, param, callee["signature"],
+                        selected, visited
+                    )
+
+        function = by_name[func]
+
+        if var not in function["params"]:
+            return
+
+        index = function["params"].index(var)
+
+        for caller_name, call_statement, args in callers_of(func):
+            if index >= len(args):
+                continue
+
+            arg_vars = ids(args[index])
+
+            if not arg_vars:
+                continue
+
+            selected.add((caller_name, call_statement.line))
+
+            for arg_var in arg_vars:
+                forward(
+                    caller_name, arg_var, call_statement.line,
+                    selected, visited
+                )
 
     slices = []
 
@@ -269,48 +378,115 @@ def build_slices(source: str, kp: KeyPoint) -> List[Slice]:
 
         if kp.direction == "backward":
             visited = set()
-            for var in ids(arg):
-                trace(kp.func, var, kp.line, selected, visited)
 
-            order = function_order(selected)
+            for var in ids(arg):
+                backward(
+                    kp.func, var, kp.line, selected, visited
+                )
+
+            names = {func for func, _ in selected}
+            source_order = {
+                f["name"]: i for i, f in enumerate(functions)
+            }
+            edges = {name: set() for name in names}
+            indegree = {name: 0 for name in names}
+
+            for caller in names:
+                for statement in statements.get(caller, []):
+                    if (caller, statement.line) not in selected:
+                        continue
+
+                    for callee, _ in calls_in(statement.text):
+                        if (
+                            callee in names
+                            and callee != caller
+                            and callee not in edges[caller]
+                        ):
+                            edges[caller].add(callee)
+                            indegree[callee] += 1
+
+            ready = sorted(
+                [name for name in names if indegree[name] == 0],
+                key=lambda name: source_order.get(name, 999)
+            )
+            order = []
+
+            while ready:
+                name = ready.pop(0)
+                order.append(name)
+
+                for callee in sorted(
+                    edges[name],
+                    key=lambda item: source_order.get(item, 999)
+                ):
+                    indegree[callee] -= 1
+
+                    if indegree[callee] == 0:
+                        ready.append(callee)
+                        ready.sort(
+                            key=lambda item: source_order.get(item, 999)
+                        )
+
+            order.extend(
+                name for name in sorted(
+                    names,
+                    key=lambda item: source_order.get(item, 999)
+                )
+                if name not in order
+            )
+
             pairs = [
-                (name, line)
-                for name in order
-                for func_name, line in sorted(selected, key=lambda x: x[1])
-                if func_name == name and (name, line) != (kp.func, kp.line)
+                (func, line)
+                for func in order
+                for selected_func, line in sorted(
+                    selected, key=lambda pair: pair[1]
+                )
+                if (
+                    selected_func == func
+                    and (func, line) != (kp.func, kp.line)
+                )
             ]
             pairs.append((kp.func, kp.line))
 
         else:
-            pairs = [(kp.func, kp.line)]
-            pending = list(ids(arg))
             visited = set()
 
-            while pending:
-                var = pending.pop()
-                if var in visited:
-                    continue
-                visited.add(var)
+            for var in ids(arg):
+                forward(
+                    kp.func, var, kp.line, selected, visited
+                )
 
-                for st in statements[kp.func]:
-                    if st.line <= kp.line:
-                        continue
-                    defs, uses = analyze(st.text)
-                    if var in uses:
-                        selected.add((kp.func, st.line))
-                        pending.extend(defs - visited)
+            kp_pair = (kp.func, kp.line)
+            remaining = selected - {kp_pair}
 
-            pairs.extend(sorted(
-                selected - {(kp.func, kp.line)},
-                key=lambda x: x[1],
-            ))
+           # Chỉ loại chữ ký của hàm chứa key point.
+# Giữ chữ ký của các hàm được gọi nếu chúng thuộc slice.
+            remaining = {
+                pair for pair in remaining
+                if pair != (kp.func, by_name[kp.func]["signature"])
+            }
+            source_order = {
+                f["name"]: i for i, f in enumerate(functions)
+            }
+
+            pairs = [kp_pair] + sorted(
+                remaining,
+                key=lambda pair: (
+                    0 if pair[0] == "main" else 1,
+                    pair[1] if pair[0] == "main"
+                    else source_order.get(pair[0], 999),
+                    pair[1],
+                )
+            )
 
         slices.append(Slice(
             key_point=kp,
             arg=arg,
             direction=kp.direction,
             statements=tuple(
-                lookup[p] for p in pairs if p in lookup
+                lookup[pair]
+                for pair in pairs
+                if pair in lookup
             ),
         ))
 
