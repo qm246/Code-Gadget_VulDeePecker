@@ -17,6 +17,8 @@ Muốn thêm ví dụ: tạo file mới cases/<ten_ban>_<so>.py, KHÔNG sửa fi
 import importlib
 import pkgutil
 import sys
+import json
+import os
 
 import cases
 from gadget import assemble_gadget
@@ -25,8 +27,12 @@ from pipeline import run_pipeline
 from slicer import build_slices
 from vdp_contract import KeyPoint, Slice, Statement
 
-# recv là forward theo bài báo; hướng các hàm khác nhóm tự chốt trong api_list.json.
-API_LIST = {"strcpy": "backward", "recv": "forward"}
+# Danh sách API lấy từ api_list.json (cùng file chương trình thật dùng),
+# nên test và chương trình luôn đồng bộ. Đường dẫn tính theo vị trí file này
+# nên chạy từ thư mục nào cũng được.
+_API_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_list.json")
+with open(_API_PATH, encoding="utf-8") as _f:
+    API_LIST = json.load(_f)
 
 CASES = [importlib.import_module(f"cases.{m.name}").CASE
          for m in sorted(pkgutil.iter_modules(cases.__path__), key=lambda m: m.name)]
