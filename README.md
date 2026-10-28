@@ -1,6 +1,6 @@
 # Tái hiện Key Point → Slicing → Code Gadget (VulDeePecker)
 
-Dự án NCKH tại Trường Đại học Công nghiệp Hà Nội (HaUI), khoa SICT, GVHD: PGS. Lê Trọng Vĩnh.
+Dự án NCKH tại Trường Đại học Công nghiệp Hà Nội (HaUI), khoa MMT&TT, GVHD: PGS. Lê Trọng Vĩnh.
 
 Nhóm cài đặt lại ba bước đầu của hệ thống VulDeePecker: tìm lời gọi hàm API nghi vấn (Key Point), sinh program slice cho từng đối số, rồi ghép thành Code Gadget. Chương trình đọc một file mã nguồn C và in ra các code gadget. Các bước sau của bài báo (gán nhãn, vector hóa, mạng BLSTM) chưa nằm trong phạm vi.
 
@@ -41,5 +41,6 @@ Mỗi lời gọi API cho đúng một code gadget.
 ## Cài đặt và chạy
 
 Chạy test: `python test_golden.py` (PASS / FAIL / TODO).
+
 Chạy demo: python pipeline.py sample1.c
 
